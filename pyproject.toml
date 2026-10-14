@@ -1,0 +1,37 @@
+[project]
+name = "finalproject-naumov-m26-555"
+version = "0.1.0"
+description = "ValutaTrade Hub: консольная симуляция валютного кошелька"
+readme = "README.md"
+authors = [
+    { name = "Mikhail Naumov", email = "mi-n@list.ru" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "prettytable>=3.18.0,<4.0.0",
+]
+
+[project.scripts]
+valutatrade = "valutatrade_hub.cli.interface:main"
+project = "valutatrade_hub.cli.interface:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.10,<0.17.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "valutatrade_hub"
+module-root = "."
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+exclude = [".venv", "dist", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
