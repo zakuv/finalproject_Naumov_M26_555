@@ -30,6 +30,7 @@ class CliStartupTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, "-B", str(MAIN_SCRIPT)],
             cwd=self.cwd,
+            input="",
             capture_output=True,
             text=True,
             encoding="utf-8",
