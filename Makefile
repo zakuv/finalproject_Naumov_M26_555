@@ -1,4 +1,4 @@
-.PHONY: install run project lint format build publish package-install
+.PHONY: install run project lint test format build publish package-install
 
 install:
 	uv sync --locked
@@ -11,6 +11,9 @@ project:
 
 lint:
 	uv run ruff check .
+
+test:
+	uv run python -m unittest discover -s tests -v
 
 format:
 	uv run ruff format .

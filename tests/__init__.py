@@ -1,0 +1,1 @@
+"""Проверки ValutaTrade Hub."""
