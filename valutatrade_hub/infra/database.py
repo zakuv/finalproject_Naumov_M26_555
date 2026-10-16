@@ -1,4 +1,4 @@
-"""Доступ к JSON-хранилищу пользователей и портфелей."""
+"""Доступ к JSON-хранилищу пользователей, портфелей и курсов валют."""
 
 import json
 import os
@@ -7,6 +7,11 @@ from pathlib import Path
 
 from valutatrade_hub.core.exceptions import StorageError
 from valutatrade_hub.core.models import Portfolio, User
+from valutatrade_hub.core.utils import (
+    parse_timestamp,
+    validate_currency_code,
+    validate_number,
+)
 
 DEFAULT_DATA_DIR = "data"
 USERS_FILE = "users.json"
@@ -80,8 +85,8 @@ class JsonStorage:
         ):
             raise StorageError(path, "ожидается список JSON-объектов")
 
-    def _read_records(self, filename: str) -> list[dict]:
-        """Прочитать JSON без замены повреждённых данных пустым списком."""
+    def _read_json(self, filename: str) -> object:
+        """Прочитать JSON без подмены повреждённых данных значениями по умолчанию."""
         path = self.data_dir / filename
         try:
             with path.open("r", encoding="utf-8") as file:
@@ -95,7 +100,12 @@ class JsonStorage:
             raise StorageError(
                 path, f"не удалось прочитать JSON ({type(error).__name__})"
             ) from None
-        self._validate_records(data, path)
+        return data
+
+    def _read_records(self, filename: str) -> list[dict]:
+        """Прочитать JSON со списком записей пользователей или портфелей."""
+        data = self._read_json(filename)
+        self._validate_records(data, self.data_dir / filename)
         return data
 
     def _user_records(self, users: list[User]) -> list[dict]:
@@ -161,7 +171,7 @@ class JsonStorage:
             portfolios.append(portfolio)
         return portfolios
 
-    def _write_records(self, filename: str, data: list[dict]) -> None:
+    def _write_json(self, filename: str, data: object) -> None:
         """Сериализовать данные и атомарно заменить файл из того же каталога."""
         path = self.data_dir / filename
         temporary_path = None
@@ -181,7 +191,7 @@ class JsonStorage:
                 os.fsync(file.fileno())
             os.replace(temporary_path, path)
             temporary_path = None
-        except (OSError, UnicodeError, TypeError, ValueError) as error:
+        except (OSError, UnicodeError, TypeError, ValueError, RecursionError) as error:
             raise StorageError(
                 path, f"не удалось сохранить JSON ({type(error).__name__})"
             ) from None
@@ -209,7 +219,7 @@ class JsonStorage:
                 self.data_dir / USERS_FILE,
                 "новый список пользователей оставляет портфель без владельца",
             )
-        self._write_records(USERS_FILE, records)
+        self._write_json(USERS_FILE, records)
 
     def load_portfolios(self, users: list[User] | None = None) -> list[Portfolio]:
         """Связать портфели с переданными User, иначе загрузить их из users.json."""
@@ -233,4 +243,46 @@ class JsonStorage:
         users = self.load_users()
         self.load_portfolios(users)
         self._decode_portfolios(records, users)
-        self._write_records(PORTFOLIOS_FILE, records)
+        self._write_json(PORTFOLIOS_FILE, records)
+
+    def _validate_rates(self, snapshot: object) -> None:
+        """Проверить схему снимка курсов, не удаляя дополнительные метаданные."""
+        path = self.data_dir / RATES_FILE
+        if (
+            not isinstance(snapshot, dict)
+            or not isinstance(snapshot.get("pairs"), dict)
+            or "last_refresh" not in snapshot
+        ):
+            raise StorageError(path, "ожидается объект с pairs и last_refresh")
+
+        try:
+            if snapshot["last_refresh"] is not None:
+                parse_timestamp(snapshot["last_refresh"])
+            for pair, quote in snapshot["pairs"].items():
+                if not isinstance(pair, str) or not isinstance(quote, dict):
+                    raise ValueError("Некорректная запись котировки")
+                codes = pair.split("_")
+                if len(codes) != 2 or any(
+                    validate_currency_code(code) != code for code in codes
+                ):
+                    raise ValueError("Некорректный код валютной пары")
+                validate_number(quote["rate"], "Курс")
+                parse_timestamp(quote["updated_at"])
+                if not isinstance(quote["source"], str) or not quote["source"].strip():
+                    raise ValueError("Не указан источник котировки")
+        except (KeyError, TypeError, ValueError):
+            raise StorageError(
+                path, "некорректная схема котировки или времени обновления"
+            ) from None
+
+    def load_rates(self) -> dict:
+        """Прочитать проверенный снимок котировок вместе с его метаданными."""
+        snapshot = self._read_json(RATES_FILE)
+        self._validate_rates(snapshot)
+        return snapshot
+
+    def save_rates(self, snapshot: dict) -> None:
+        """Сохранить корректный снимок, отказавшись менять повреждённый файл."""
+        self._validate_rates(snapshot)
+        self.load_rates()
+        self._write_json(RATES_FILE, snapshot)
