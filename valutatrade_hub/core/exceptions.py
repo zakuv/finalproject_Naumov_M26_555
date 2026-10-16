@@ -24,3 +24,21 @@ class StorageError(RuntimeError):
         """Сохранить путь и безопасное описание причины без содержимого файла."""
         self.path = Path(path)
         super().__init__(f"Ошибка хранилища '{self.path}': {reason}")
+
+
+class CurrencyNotFoundError(ValueError):
+    """Неизвестная валюта среди поддерживаемых приложением."""
+
+    def __init__(self, code: str) -> None:
+        """Сохранить код валюты и подготовить сообщение пользователю."""
+        self.code = code
+        super().__init__(f"Неизвестная валюта '{code}'")
+
+
+class ApiRequestError(RuntimeError):
+    """Не удалось получить актуальный курс из источника котировок."""
+
+    def __init__(self, reason: str) -> None:
+        """Сохранить причину ошибки обращения к источнику курсов."""
+        self.reason = reason
+        super().__init__(f"Ошибка при обращении к внешнему API: {reason}")
