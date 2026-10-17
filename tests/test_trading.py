@@ -1,5 +1,6 @@
 """Проверки торговли, свежести курсов и сохранности портфелей."""
 
+import json
 import subprocess
 import sys
 import unittest
@@ -258,9 +259,173 @@ class TradingTests(unittest.TestCase):
             self.trading.show_portfolio("ZZZ")
         self.provider.assert_not_called()
 
+    def test_refresher_updates_cache_and_fresh_quotes_skip_it(self):
+        """Parser обновляет тот же кеш, а свежая пара не вызывает новый запрос."""
+        self.store_quotes([("EUR_USD", 2, self.now - timedelta(seconds=400))])
+
+        def refresh():
+            self.store_quotes([("EUR_USD", 3, self.now)])
+            return {"updated_count": 1, "errors": []}
+
+        refresher = Mock(side_effect=refresh)
+        rates = RateService(self.storage, clock=lambda: self.now, refresher=refresher)
+        self.assertEqual(rates.get_rate("EUR", "USD")["rate"], 3)
+        before = (self.storage.data_dir / "rates.json").read_bytes()
+        self.assertAlmostEqual(rates.get_rate("USD", "EUR")["rate"], 1 / 3)
+        self.assertEqual(rates.get_rate("USD", "USD")["rate"], 1)
+        refresher.assert_called_once()
+        self.assertEqual((self.storage.data_dir / "rates.json").read_bytes(), before)
+
+    def test_partial_refresh_cannot_make_an_unmodified_stale_leg_fresh(self):
+        """Обновление другой пары и корневого времени не отменяет TTL старой ноги."""
+        old = self.now - timedelta(seconds=400)
+        self.store_quotes([("EUR_USD", 2, old), ("BTC_USD", 100, old)])
+
+        def refresh_other_pair():
+            self.store_quotes([("EUR_USD", 2, old), ("BTC_USD", 110, self.now)])
+            return {"updated_count": 1, "errors": ["fiat unavailable"]}
+
+        refresher = Mock(side_effect=refresh_other_pair)
+        rates = RateService(self.storage, clock=lambda: self.now, refresher=refresher)
+        with self.assertRaisesRegex(ApiRequestError, "update-rates"):
+            rates.get_rate("EUR", "BTC")
+        refresher.assert_called_once()
+        self.assertEqual(self.storage.load_rates()["pairs"]["EUR_USD"]["rate"], 2)
+
+    def test_refresher_failure_never_substitutes_demo_rates(self):
+        """При отказе Parser отсутствующий курс не заменяется учебным числом."""
+        refresher = Mock(side_effect=ApiRequestError("источник недоступен"))
+        rates = RateService(self.storage, clock=lambda: self.now, refresher=refresher)
+        path = self.storage.data_dir / "rates.json"
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ApiRequestError, "update-rates"):
+            rates.get_rate("EUR", "USD")
+        self.assertEqual(path.read_bytes(), before)
+        refresher.assert_called_once()
+
+    def test_lazy_parser_uses_current_storage_for_cache_and_history(self):
+        """Parser без явного callback пишет обе структуры рядом с переданным Core."""
+        rates = RateService(self.storage)
+        with (
+            patch(
+                "valutatrade_hub.parser_service.api_clients.CoinGeckoClient.fetch_rates",
+                return_value={"BTC_USD": 100},
+            ),
+            patch(
+                "valutatrade_hub.parser_service.api_clients."
+                "ExchangeRateApiClient.fetch_rates",
+                return_value={"EUR_USD": 2},
+            ),
+        ):
+            self.assertEqual(rates.get_rate("EUR", "USD")["rate"], 2)
+        history = json.loads(
+            (self.storage.data_dir / "exchange_rates.json").read_text("utf-8")
+        )
+        self.assertEqual(
+            {record["from_currency"] for record in history}, {"BTC", "EUR"}
+        )
+        self.assertEqual(self.storage.load_rates()["pairs"]["BTC_USD"]["rate"], 100)
+
+    def test_explicit_numeric_provider_does_not_call_parser_refresher(self):
+        """Явный провайдер остаётся изолированным источником для тестов."""
+        refresher = Mock(side_effect=AssertionError("Parser must not be called"))
+        rates = RateService(
+            self.storage,
+            provider=self.provider,
+            clock=lambda: self.now,
+            source="Fixture",
+            refresher=refresher,
+        )
+        self.assertEqual(rates.get_rate("EUR", "USD")["rate"], 2)
+        self.provider.assert_called_once()
+        refresher.assert_not_called()
+
+    def test_show_rates_reads_cache_and_marks_stale_quotes_without_refresh(self):
+        """Просмотр не пишет кеш и честно отмечает дату каждой старой котировки."""
+        old = self.now - timedelta(seconds=400)
+        self.store_quotes([("EUR_USD", 2, self.now), ("ETH_USD", 10, old)])
+        refresher = Mock(side_effect=AssertionError("No network for show-rates"))
+        rates = RateService(self.storage, clock=lambda: self.now, refresher=refresher)
+        path = self.storage.data_dir / "rates.json"
+        before = path.read_bytes()
+        report = rates.show_rates()
+        self.assertEqual(
+            (report["base"], report["last_refresh"]), ("USD", self.now.isoformat())
+        )
+        self.assertEqual(
+            [row["pair"] for row in report["rows"]], ["ETH_USD", "EUR_USD"]
+        )
+        rows = {row["pair"]: row for row in report["rows"]}
+        self.assertTrue(rows["ETH_USD"]["stale"])
+        self.assertFalse(rows["EUR_USD"]["stale"])
+        self.assertEqual(datetime.fromisoformat(rows["ETH_USD"]["updated_at"]), old)
+        self.assertEqual(path.read_bytes(), before)
+        refresher.assert_not_called()
+
+    def test_show_rates_filters_crypto_top_and_converts_from_all_cached_pairs(self):
+        """Кросс-курс использует обратную USD-ногу, top исключает дорогой фиат."""
+        older = self.now - timedelta(seconds=20)
+        self.store_quotes(
+            [
+                ("USD_EUR", 0.5, older),
+                ("BTC_USD", 100, self.now),
+                ("ETH_USD", 10, self.now),
+                ("SOL_USD", 1, self.now),
+                ("GBP_USD", 1000, self.now),
+            ]
+        )
+        report = self.rates.show_rates(top=2, base="eur")
+        self.assertEqual(
+            [row["pair"] for row in report["rows"]], ["BTC_EUR", "ETH_EUR"]
+        )
+        self.assertEqual([row["rate"] for row in report["rows"]], [50, 5])
+        self.assertTrue(
+            all(
+                datetime.fromisoformat(row["updated_at"]) == older
+                for row in report["rows"]
+            )
+        )
+        filtered = self.rates.show_rates(currency=" sol ", base="EUR")
+        self.assertEqual(len(filtered["rows"]), 1)
+        self.assertEqual(
+            (filtered["rows"][0]["pair"], filtered["rows"][0]["rate"]), ("SOL_EUR", 0.5)
+        )
+        self.provider.assert_not_called()
+
+    def test_show_rates_checks_empty_cache_filters_and_both_leg_timestamps(self):
+        """Пустой кеш и неверные фильтры дают ошибки, будущая нога не свежая."""
+        with self.assertRaisesRegex(ValueError, "Локальный кеш курсов пуст"):
+            self.rates.show_rates()
+        self.store_quotes(
+            [
+                ("EUR_USD", 2, self.now - timedelta(seconds=10)),
+                ("BTC_USD", 100, self.now + timedelta(seconds=1)),
+            ]
+        )
+        for top in (0, -1, True, 1.5):
+            with self.subTest(top=top), self.assertRaises(ValueError):
+                self.rates.show_rates(top=top)
+        with self.assertRaisesRegex(ValueError, "'ZZZ' не найден"):
+            self.rates.show_rates(currency="ZZZ")
+        with self.assertRaises(CurrencyNotFoundError):
+            self.rates.show_rates(base="ZZZ")
+        row = self.rates.show_rates(currency="BTC", base="EUR")["rows"][0]
+        self.assertEqual(row["rate"], 50)
+        self.assertTrue(row["stale"])
+        self.provider.assert_not_called()
+
+    def test_show_rates_missing_cache_reports_how_to_load_quotes(self):
+        """Отсутствующий файл показывается как пустой кеш без обращения к API."""
+        (self.storage.data_dir / "rates.json").unlink()
+        with self.assertRaisesRegex(ValueError, "Выполните 'update-rates'"):
+            self.rates.show_rates()
+        self.provider.assert_not_called()
+
     def test_cli_lifecycle_recovers_from_trade_and_argument_errors(self):
         """Настоящий CLI выполняет сделки и продолжает ввод после ошибок."""
         password = "cli-trading-password"
+        self.now = datetime.now(UTC)
+        self.store_quotes([("EUR_USD", 2, self.now)])
         commands = (
             "buy --currency EUR --amount 1\n"
             f"register --username Alice --password {password}\n"

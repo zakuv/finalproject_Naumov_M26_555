@@ -26,6 +26,15 @@ class StorageError(RuntimeError):
         super().__init__(f"Ошибка хранилища '{self.path}': {reason}")
 
 
+class ConfigurationError(ValueError):
+    """Не удалось загрузить или проверить конфигурацию приложения."""
+
+    def __init__(self, path: str | Path, reason: str) -> None:
+        """Сохранить путь и причину, не включая содержимое настроек."""
+        self.path = Path(path)
+        super().__init__(f"Ошибка конфигурации '{self.path}': {reason}")
+
+
 class CurrencyNotFoundError(ValueError):
     """Неизвестная валюта среди поддерживаемых приложением."""
 

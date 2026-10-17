@@ -6,19 +6,25 @@ import sys
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import get_supported_codes
 from valutatrade_hub.core.exceptions import (
     ApiRequestError,
+    ConfigurationError,
     CurrencyNotFoundError,
+    InsufficientFundsError,
     StorageError,
 )
 from valutatrade_hub.core.usecases import PortfolioService, RateService, UserService
 from valutatrade_hub.core.utils import (
-    DEFAULT_BASE_CURRENCY,
     DEMO_SOURCE,
-    SUPPORTED_CURRENCIES,
     parse_timestamp,
 )
-from valutatrade_hub.infra.database import JsonStorage
+from valutatrade_hub.infra.database import DatabaseManager
+from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.logging_config import configure_logging
+from valutatrade_hub.parser_service.config import ParserConfig
+from valutatrade_hub.parser_service.storage import RatesStorage
+from valutatrade_hub.parser_service.updater import RatesUpdater
 
 COMMAND_PROMPT = "Введите команду: "
 COMMAND_HELP = {
@@ -28,6 +34,12 @@ COMMAND_HELP = {
     "buy": "buy --currency <код> --amount <количество> — купить валюту",
     "sell": "sell --currency <код> --amount <количество> — продать валюту",
     "get-rate": "get-rate --from <код> --to <код> — получить курс",
+    "update-rates": (
+        "update-rates [--source coingecko|exchangerate] — обновить курсы из API"
+    ),
+    "show-rates": (
+        "show-rates [--currency <код>] [--top <N>] [--base <код>] — курсы из кэша"
+    ),
     "logout": "logout — завершить текущую сессию",
     "help": "help [команда] — показать справку",
     "exit": "exit — выйти из приложения",
@@ -60,7 +72,7 @@ def _create_parsers() -> dict[str, CommandArgumentParser]:
     portfolio_parser = CommandArgumentParser(
         prog="show-portfolio", add_help=False, allow_abbrev=False
     )
-    portfolio_parser.add_argument("--base", default=DEFAULT_BASE_CURRENCY)
+    portfolio_parser.add_argument("--base")
     parsers["show-portfolio"] = portfolio_parser
     rate_parser = CommandArgumentParser(
         prog="get-rate", add_help=False, allow_abbrev=False
@@ -68,6 +80,18 @@ def _create_parsers() -> dict[str, CommandArgumentParser]:
     rate_parser.add_argument("--from", dest="from_code", required=True)
     rate_parser.add_argument("--to", dest="to_code", required=True)
     parsers["get-rate"] = rate_parser
+    update_parser = CommandArgumentParser(
+        prog="update-rates", add_help=False, allow_abbrev=False
+    )
+    update_parser.add_argument("--source", choices=("coingecko", "exchangerate"))
+    parsers["update-rates"] = update_parser
+    show_parser = CommandArgumentParser(
+        prog="show-rates", add_help=False, allow_abbrev=False
+    )
+    show_parser.add_argument("--currency")
+    show_parser.add_argument("--top", type=int)
+    show_parser.add_argument("--base")
+    parsers["show-rates"] = show_parser
     return parsers
 
 
@@ -79,8 +103,8 @@ def _show_help(arguments: list[str]) -> None:
         print(COMMAND_HELP[arguments[0]])
         if arguments[0] in ("buy", "sell"):
             print("--amount задаёт количество самой валюты; стоимость указана в USD.")
-        if arguments[0] in ("get-rate", "show-portfolio", "buy", "sell"):
-            print("Поддерживаемые валюты: " + ", ".join(sorted(SUPPORTED_CURRENCIES)))
+        if arguments[0] in ("get-rate", "show-rates", "show-portfolio", "buy", "sell"):
+            print("Поддерживаемые валюты: " + ", ".join(get_supported_codes()))
     else:
         raise ValueError("Используйте help или help <известная команда>.")
 
@@ -149,6 +173,7 @@ def _execute_command(
     portfolios: PortfolioService,
     rates: RateService,
     parsers: dict[str, CommandArgumentParser],
+    updater: RatesUpdater | None = None,
 ) -> bool:
     """Вызвать сценарий и вернуть, нужно ли продолжать чтение команд."""
     command, *arguments = tokens
@@ -183,18 +208,70 @@ def _execute_command(
         _print_trade(command, operation(options.currency, options.amount))
     elif command == "get-rate":
         _print_rate(rates.get_rate(options.from_code, options.to_code))
+    elif command == "show-rates":
+        _print_rates(rates.show_rates(options.currency, options.top, options.base))
+    elif command == "update-rates":
+        result = (updater if updater is not None else RatesUpdater()).run_update(
+            options.source
+        )
+        print(
+            f"Обновлено курсов: {result['updated_count']}. "
+            f"Последнее обновление: {result['last_refresh']}"
+        )
+        if result["errors"]:
+            print("Обновление завершено с ошибками. Подробности: logs/parser.log.")
+            for error in result["errors"]:
+                print(error)
+        else:
+            print("Обновление выполнено успешно.")
     return True
+
+
+def _print_rates(report: dict) -> None:
+    """Показать курсы из локального кэша и отметить устаревшие строки."""
+    print(f"Курсы из кэша (последнее обновление: {report['last_refresh']}):")
+    table = PrettyTable(["Пара", "Курс", "Обновлено (UTC)", "Источник", "Статус"])
+    table.align["Курс"] = "r"
+    for row in report["rows"]:
+        table.add_row(
+            [
+                row["pair"],
+                f"{row['rate']:.10g}",
+                parse_timestamp(row["updated_at"]).strftime("%Y-%m-%d %H:%M:%S"),
+                row["source"],
+                "устарел" if row["stale"] else "свежий",
+            ]
+        )
+    print(table)
+    if any(row["stale"] for row in report["rows"]):
+        print("Курсы устарели. Выполните update-rates.")
 
 
 def main() -> int:
     """Подготовить хранилище и читать команды до exit, EOF или прерывания."""
     try:
-        storage = JsonStorage()
+        settings = SettingsLoader()
+        configure_logging(settings)
+        storage = DatabaseManager(settings)
         service = UserService(storage)
-        rates = RateService(storage)
-        portfolios = PortfolioService(storage, service, rates)
-    except StorageError as error:
+        config = ParserConfig.from_settings(settings)
+        updater = RatesUpdater(storage=RatesStorage(config, storage), config=config)
+        rates = RateService(
+            storage,
+            ttl_seconds=settings.get("rates_ttl_seconds"),
+            refresher=updater.run_update,
+        )
+        portfolios = PortfolioService(
+            storage, service, rates, default_base=settings.get("default_base_currency")
+        )
+    except (ConfigurationError, StorageError) as error:
         print(error, file=sys.stderr)
+        return 1
+    except OSError:
+        print(
+            "Не удалось открыть журнал операций. Проверьте путь к логам.",
+            file=sys.stderr,
+        )
         return 1
     print("ValutaTrade Hub")
     print("Введите help для справки, exit для выхода.")
@@ -210,14 +287,18 @@ def main() -> int:
             if not tokens:
                 continue
             try:
-                if not _execute_command(tokens, service, portfolios, rates, parsers):
+                if not _execute_command(
+                    tokens, service, portfolios, rates, parsers, updater
+                ):
                     break
             except StorageError as error:
                 print(error)
             except CurrencyNotFoundError as error:
                 print(f"Ошибка: {error}. Введите help get-rate.")
+            except InsufficientFundsError as error:
+                print(error)
             except ApiRequestError as error:
-                print(f"{error}. Повторите попытку позже.")
+                print(f"{error}. Проверьте сеть и повторите update-rates позже.")
             except (ValueError, PermissionError) as error:
                 print(f"Ошибка: {error}")
     except (EOFError, KeyboardInterrupt):
