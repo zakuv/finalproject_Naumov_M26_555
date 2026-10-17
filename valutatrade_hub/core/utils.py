@@ -3,15 +3,12 @@
 import math
 from datetime import UTC, datetime
 
-from valutatrade_hub.core.exceptions import CurrencyNotFoundError
-
 MIN_PASSWORD_LENGTH = 4
 MIN_CURRENCY_CODE_LENGTH = 2
 MAX_CURRENCY_CODE_LENGTH = 5
 DEFAULT_BASE_CURRENCY = "USD"
 RATES_TTL_SECONDS = 300
 DEMO_SOURCE = "DemoStub"
-SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "RUB", "BTC", "ETH"})
 DEFAULT_EXCHANGE_RATES = {
     "EUR_USD": 1.0786,
     "BTC_USD": 59337.21,
@@ -71,10 +68,10 @@ def validate_currency_code(value: str) -> str:
 
 def validate_supported_currency(value: str) -> str:
     """Нормализовать код и проверить поддержку валюты приложением."""
-    code = validate_currency_code(value)
-    if code not in SUPPORTED_CURRENCIES:
-        raise CurrencyNotFoundError(code)
-    return code
+    # Локальный импорт разрывает цикл: currencies использует общие валидаторы.
+    from valutatrade_hub.core.currencies import get_currency
+
+    return get_currency(value).code
 
 
 def parse_timestamp(value: str) -> datetime:

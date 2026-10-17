@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "prettytable>=3.18.0,<4.0.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]
@@ -35,3 +36,17 @@ exclude = [".venv", "dist", "__pycache__"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.valutatrade]
+data_dir = "data"
+users_file = "users.json"
+portfolios_file = "portfolios.json"
+rates_file = "rates.json"
+history_file = "exchange_rates.json"
+rates_ttl_seconds = 300
+default_base_currency = "USD"
+log_file = "logs/actions.log"
+log_level = "INFO"
+log_format = "json"
+log_max_bytes = 1048576
+log_backup_count = 3

@@ -5,12 +5,17 @@ import os
 import tempfile
 from pathlib import Path
 
-from valutatrade_hub.core.exceptions import StorageError
+from valutatrade_hub.core.exceptions import ConfigurationError, StorageError
 from valutatrade_hub.core.models import Portfolio, User
 from valutatrade_hub.core.utils import (
     parse_timestamp,
     validate_currency_code,
     validate_number,
+)
+from valutatrade_hub.infra.settings import (
+    DEFAULT_CONFIG_FILE,
+    JSON_FILE_KEYS,
+    SettingsLoader,
 )
 
 DEFAULT_DATA_DIR = "data"
@@ -28,13 +33,44 @@ def _reject_nonfinite_number(value: str) -> None:
 class JsonStorage:
     """Хранить пользователей и портфели с атомарной заменой отдельных файлов."""
 
-    def __init__(self, data_dir: str | Path = DEFAULT_DATA_DIR) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path = DEFAULT_DATA_DIR,
+        *,
+        users_file: str = USERS_FILE,
+        portfolios_file: str = PORTFOLIOS_FILE,
+        rates_file: str = RATES_FILE,
+        history_file: str = HISTORY_FILE,
+    ) -> None:
         """Запомнить каталог и создать только отсутствующие файлы данных."""
         try:
             self.data_dir = Path(data_dir)
         except (TypeError, ValueError):
             raise StorageError(DEFAULT_DATA_DIR, "некорректный путь каталога") from None
+        self._filenames = {
+            USERS_FILE: users_file,
+            PORTFOLIOS_FILE: portfolios_file,
+            RATES_FILE: rates_file,
+            HISTORY_FILE: history_file,
+        }
+        filenames = list(self._filenames.values())
+        if any(
+            not isinstance(filename, str)
+            or not filename.strip()
+            or "/" in filename
+            or "\\" in filename
+            or "\x00" in filename
+            or not filename.endswith(".json")
+            for filename in filenames
+        ):
+            raise StorageError(self.data_dir, "ожидаются имена JSON-файлов без пути")
+        if len({filename.casefold() for filename in filenames}) != len(filenames):
+            raise StorageError(self.data_dir, "имена JSON-файлов должны различаться")
         self.initialize()
+
+    def _path(self, filename: str) -> Path:
+        """Получить путь к настроенному файлу по его стандартному имени."""
+        return self.data_dir / self._filenames[filename]
 
     def initialize(self) -> None:
         """Идемпотентно создать каталог и начальные файлы, не меняя существующие."""
@@ -53,7 +89,7 @@ class JsonStorage:
             HISTORY_FILE: [],
         }
         for filename, initial_data in defaults.items():
-            path = self.data_dir / filename
+            path = self._path(filename)
             text = json.dumps(
                 initial_data, ensure_ascii=False, indent=4, allow_nan=False
             )
@@ -87,7 +123,7 @@ class JsonStorage:
 
     def _read_json(self, filename: str) -> object:
         """Прочитать JSON без подмены повреждённых данных значениями по умолчанию."""
-        path = self.data_dir / filename
+        path = self._path(filename)
         try:
             with path.open("r", encoding="utf-8") as file:
                 data = json.load(file, parse_constant=_reject_nonfinite_number)
@@ -105,12 +141,12 @@ class JsonStorage:
     def _read_records(self, filename: str) -> list[dict]:
         """Прочитать JSON со списком записей пользователей или портфелей."""
         data = self._read_json(filename)
-        self._validate_records(data, self.data_dir / filename)
+        self._validate_records(data, self._path(filename))
         return data
 
     def _user_records(self, users: list[User]) -> list[dict]:
         """Получить JSON-представление переданных объектов пользователей."""
-        path = self.data_dir / USERS_FILE
+        path = self._path(USERS_FILE)
         if not isinstance(users, list) or not all(
             isinstance(user, User) for user in users
         ):
@@ -124,7 +160,7 @@ class JsonStorage:
 
     def _decode_users(self, records: list[dict]) -> list[User]:
         """Восстановить пользователей и проверить уникальность ID и имён."""
-        path = self.data_dir / USERS_FILE
+        path = self._path(USERS_FILE)
         self._validate_records(records, path)
         users = []
         seen_ids = set()
@@ -149,7 +185,7 @@ class JsonStorage:
         self, records: list[dict], users: list[User]
     ) -> list[Portfolio]:
         """Проверить записи и связать портфели с переданными объектами User."""
-        path = self.data_dir / PORTFOLIOS_FILE
+        path = self._path(PORTFOLIOS_FILE)
         self._validate_records(records, path)
         self._decode_users(self._user_records(users))
         owners = {user.user_id: user for user in users}
@@ -173,7 +209,7 @@ class JsonStorage:
 
     def _write_json(self, filename: str, data: object) -> None:
         """Сериализовать данные и атомарно заменить файл из того же каталога."""
-        path = self.data_dir / filename
+        path = self._path(filename)
         temporary_path = None
         try:
             text = json.dumps(data, ensure_ascii=False, indent=4, allow_nan=False)
@@ -181,7 +217,7 @@ class JsonStorage:
                 mode="w",
                 encoding="utf-8",
                 dir=self.data_dir,
-                prefix=f".{filename}.",
+                prefix=f".{path.name}.",
                 suffix=".tmp",
                 delete=False,
             ) as file:
@@ -216,7 +252,7 @@ class JsonStorage:
         owner_ids = {user.user_id for user in validated_users}
         if any(portfolio.user_id not in owner_ids for portfolio in previous_portfolios):
             raise StorageError(
-                self.data_dir / USERS_FILE,
+                self._path(USERS_FILE),
                 "новый список пользователей оставляет портфель без владельца",
             )
         self._write_json(USERS_FILE, records)
@@ -229,7 +265,7 @@ class JsonStorage:
 
     def save_portfolios(self, portfolios: list[Portfolio]) -> None:
         """Сохранить портфели существующих пользователей после проверки всех записей."""
-        path = self.data_dir / PORTFOLIOS_FILE
+        path = self._path(PORTFOLIOS_FILE)
         if not isinstance(portfolios, list) or not all(
             isinstance(portfolio, Portfolio) for portfolio in portfolios
         ):
@@ -247,7 +283,7 @@ class JsonStorage:
 
     def _validate_rates(self, snapshot: object) -> None:
         """Проверить схему снимка курсов, не удаляя дополнительные метаданные."""
-        path = self.data_dir / RATES_FILE
+        path = self._path(RATES_FILE)
         if (
             not isinstance(snapshot, dict)
             or not isinstance(snapshot.get("pairs"), dict)
@@ -286,3 +322,36 @@ class JsonStorage:
         self._validate_rates(snapshot)
         self.load_rates()
         self._write_json(RATES_FILE, snapshot)
+
+
+class DatabaseManager(JsonStorage):
+    """Единый настроенный JSON-репозиторий для работающего приложения."""
+
+    _instance = None
+
+    def __new__(cls, settings: SettingsLoader | None = None):
+        """Выбрать простой __new__, сохранив JsonStorage обычным классом."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, settings: SettingsLoader | None = None) -> None:
+        """Один раз создать хранилище по проверенным настройкам приложения."""
+        if settings is None:
+            settings = SettingsLoader()
+        if not isinstance(settings, SettingsLoader):
+            raise ConfigurationError(
+                DEFAULT_CONFIG_FILE, "ожидается объект SettingsLoader"
+            )
+        filenames = {key: settings.get(key) for key in JSON_FILE_KEYS}
+        signature = (settings.get("data_dir"), *filenames.values())
+        if getattr(self, "_initialized", False):
+            if signature != self._signature:
+                raise ConfigurationError(
+                    settings.config_path,
+                    "пути хранилища изменились: перезапустите приложение",
+                )
+            return
+        super().__init__(settings.get("data_dir"), **filenames)
+        self._signature = signature
+        self._initialized = True
