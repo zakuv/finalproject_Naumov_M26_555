@@ -136,6 +136,45 @@ class WalletTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Wallet("USD", invalid)
 
+    def test_fractional_withdrawals_can_exhaust_wallet(self):
+        """Погрешность вычитания не мешает снять оставшуюся дробную сумму."""
+        for balance, first, remaining in ((0.3, 0.1, 0.2), (3e-13, 1e-13, 2e-13)):
+            with self.subTest(balance=balance):
+                wallet = Wallet("EUR", balance)
+                wallet.withdraw(first)
+                wallet.withdraw(remaining)
+                self.assertEqual(wallet.balance, 0.0)
+        wallet = Wallet("EUR", 0.3)
+        for _ in range(3):
+            wallet.withdraw(0.1)
+        self.assertEqual(wallet.balance, 0.0)
+
+    def test_withdrawal_preserves_real_large_and_small_remainders(self):
+        """Обычное снятие сохраняет остаток независимо от масштаба баланса."""
+        wallet = Wallet("EUR", 1e15)
+        wallet.withdraw(1e15 - 1)
+        self.assertEqual(wallet.balance, 1.0)
+        wallet = Wallet("BTC", 1e-18)
+        wallet.withdraw(5e-19)
+        self.assertEqual(wallet.balance, 5e-19)
+
+    def test_rounding_tolerance_does_not_allow_real_overdraft(self):
+        """Допуск float не разрешает перерасход или снятие из пустого кошелька."""
+        for balance, amount in (
+            (0.0, 1e-18),
+            (0.0, 5e-324),
+            (0.2, 0.200001),
+            (1e-18, 2e-18),
+            (5e-324, 1.5e-323),
+            (1e12, 1e12 + 1),
+            (1e15, 1e15 + 1),
+        ):
+            with self.subTest(balance=balance, amount=amount):
+                wallet = Wallet("BTC", balance)
+                with self.assertRaises(InsufficientFundsError):
+                    wallet.withdraw(amount)
+                self.assertEqual(wallet.balance, balance)
+
     def test_invalid_movements_leave_balance_unchanged(self):
         """Некорректные суммы не меняют кошелёк ни при одной операции."""
         wallet = Wallet("USD", 100)

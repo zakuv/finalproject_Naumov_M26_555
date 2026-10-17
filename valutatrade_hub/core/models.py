@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import secrets
 from datetime import UTC, datetime
 
@@ -18,6 +19,7 @@ from valutatrade_hub.core.utils import (
 )
 
 SALT_BYTES = 16
+BALANCE_REL_TOLERANCE = 1e-15
 
 
 class User:
@@ -177,7 +179,14 @@ class Wallet:
         """Снять положительную сумму при достаточном балансе."""
         amount = validate_number(amount)
         if amount > self.balance:
-            raise InsufficientFundsError(self.balance, amount, self.currency_code)
+            # Допуск ограничен точностью float и относительной разницей сумм.
+            tolerance = min(
+                self.balance * BALANCE_REL_TOLERANCE,
+                math.ulp(self.balance) + math.ulp(amount),
+            )
+            if amount - self.balance > tolerance:
+                raise InsufficientFundsError(self.balance, amount, self.currency_code)
+            amount = self.balance
         self.balance -= amount
 
     def get_balance_info(self) -> dict:

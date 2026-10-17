@@ -24,5 +24,5 @@ build:
 publish:
 	uvx twine check dist/*
 
-package-install: install
+package-install: install build
 	uv pip install --python .venv/bin/python --reinstall --no-deps dist/*.whl
