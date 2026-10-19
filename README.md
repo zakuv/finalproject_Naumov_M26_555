@@ -422,7 +422,8 @@ finalproject_Naumov_M26_555/
 │   └── test_parser_cli.py
 ├── demo/
 │   ├── record_demo.py
-│   └── valutatrade.cast
+│   ├── valutatrade.cast
+│   └── valutatrade-live.cast
 ├── Makefile
 ├── pyproject.toml
 ├── uv.lock
@@ -468,16 +469,28 @@ make package-install
 
 ## Демонстрация
 
-`demo/valutatrade.cast` — запись asciinema v2 полного цикла: регистрация,
-вход, покупка, продажа, портфель, курс, `update-rates`, фильтры `show-rates`
-и ошибки недостатка средств/неизвестной валюты.
+`demo/valutatrade-live.cast` — ручная запись работы приложения с настоящими
+API CoinGecko и ExchangeRate-API в формате asciinema v2. Показаны регистрация,
+вход, покупка, продажа, портфель, получение курса, `update-rates`, фильтры
+`show-rates` и ошибки недостатка средств/неизвестной валюты.
+
+Для просмотра записи:
 
 ```bash
-asciinema play demo/valutatrade.cast
-uv run python demo/record_demo.py
+asciinema play demo/valutatrade-live.cast
 ```
 
-Второй вызов воспроизводит сценарий и обновляет запись. Демо запускает
-настоящий CLI с фиксированными ответами API из задания через `unittest.mock`.
-Это демонстрационные данные, а не запись живых рыночных котировок.
-Ключ и сеть не нужны; все данные сценария находятся во временном каталоге.
+Пробел ставит воспроизведение на паузу и продолжает его, Ctrl+C завершает
+просмотр. Для просмотра готовой записи сеть и API-ключ не нужны.
+
+Для проверки без сети также оставлен учебный сценарий:
+
+```bash
+uv run python demo/record_demo.py
+asciinema play demo/valutatrade.cast
+```
+
+Он запускает CLI с фиксированными ответами API из задания через
+`unittest.mock` и обновляет отдельную запись `demo/valutatrade.cast`.
+Данные этого сценария находятся во временном каталоге; настоящая ручная
+запись `demo/valutatrade-live.cast` при его запуске сохраняется.
